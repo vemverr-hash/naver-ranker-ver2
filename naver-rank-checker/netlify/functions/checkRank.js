@@ -1,4 +1,3 @@
-const axios = require('axios');
 const cheerio = require('cheerio');
 
 exports.handler = async function(event, context) {
@@ -9,83 +8,72 @@ exports.handler = async function(event, context) {
     try {
         const { keyword, targetUrl } = JSON.parse(event.body);
         
-        // 1. 순위 파악에 가장 정확한 '네이버 모바일 통합검색' 사용
+        // 1. 네이버 모바일 통합검색 (가장 구조가 직관적임)
         const searchUrl = `https://m.search.naver.com/search.naver?where=m&query=${encodeURIComponent(keyword)}`;
 
-        // 2. 완벽한 모바일 크롬 브라우저 위장 (스마트폰에서 직접 검색하는 것과 100% 동일한 헤더)
-        const response = await axios.get(searchUrl, {
+        // 2. Axios를 버리고 Native Fetch 사용 + Googlebot으로 완벽 위장
+        // (네이버는 구글 봇에게 자바스크립트가 배제된 깔끔한 정적 HTML을 제공하며 차단하지 않습니다)
+        const response = await fetch(searchUrl, {
             headers: {
-                'User-Agent': 'Mozilla/5.0 (Linux; Android 13; SM-S918N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-                'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
-                'Cache-Control': 'no-cache',
-                'Pragma': 'no-cache',
-                'Sec-Fetch-Dest': 'document',
-                'Sec-Fetch-Mode': 'navigate',
-                'Sec-Fetch-Site': 'none'
-            },
-            timeout: 12000
+                'User-Agent': 'Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'ko-KR,ko;q=0.9'
+            }
         });
 
-        const html = response.data;
+        const html = await response.text();
         const $ = cheerio.load(html);
 
-        // 네이버 IP 차단(캡차) 확인
-        if (html.includes('자동 입력 방지') || $('title').text().includes('캡차')) {
-            return { statusCode: 200, body: JSON.stringify({ rank: -1, errorMsg: '🚨 네이버 캡차(IP 차단) 발생' }) };
+        // 광고 영역 완전히 삭제
+        $('.sp_powerlink, .powerlink_group, .sp_ntotal_ad, #power_link_body').remove();
+
+        // 3. 스마트한 타겟 URL 추출 (가장 중요한 부분)
+        // 네이버가 링크를 'cr.naver.com'으로 숨기거나 텍스트를 'cukiz.c...' 처럼 잘라버리는 것을 방지
+        const cleanUrl = targetUrl.replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/^m\./, '').toLowerCase();
+        let searchTarget = '';
+
+        if (cleanUrl.includes('blog.naver.com') || cleanUrl.includes('smartstore.naver.com')) {
+            // 네이버 블로그/스마트스토어인 경우 ID로 검색 (예: blog.naver.com/myid -> myid)
+            searchTarget = cleanUrl.split('/')[1] || cleanUrl;
+        } else {
+            // 일반 웹사이트인 경우 도메인 핵심만 추출 (예: cukiz.co.kr -> cukiz)
+            // 도메인이 너무 짧은 경우를 대비해 첫 번째 마디만 추출
+            searchTarget = cleanUrl.split('.')[0]; 
         }
-
-        // [중요] 정확한 순위 계산을 위해 파워링크(광고) 블록을 HTML에서 아예 삭제해버림
-        $('.sp_powerlink, .powerlink_group, .sp_ntotal_ad').remove();
-
-        // 도메인 핵심만 추출 (예: https://www.cukiz.co.kr/123 -> cukiz.co.kr)
-        const cleanTargetUrl = targetUrl
-            .replace(/^https?:\/\//, '')
-            .replace(/^www\./, '')
-            .replace(/^m\./, '')
-            .split('/')[0]
-            .toLowerCase();
 
         let rank = -1;
         let currentRank = 1;
-        let blockType = ''; // 어떤 영역(스마트블록 등)에서 발견되었는지 확인용
+        let blockType = '오가닉 결과';
 
-        // 3. 스마트블록을 포함한 모바일 네이버의 모든 '검색 결과 카드' 선택자
-        // .total_wrap (일반웹/뷰) / .api_bx (스마트블록 내부 카드) / li.bx (기타 리스트)
+        // 네이버의 모든 주요 검색결과 카드 선택
         const items = $('#main_pack .total_wrap, #main_pack .api_bx, #main_pack li.bx');
 
         items.each((i, el) => {
-            // 부모/자식 중복 카운트 방지 (스마트블록 안의 카드를 셀 때, 껍데기 박스는 순위에서 제외)
+            // 자식-부모 중복 카운트 방지
             if ($(el).hasClass('api_bx') && $(el).parents('.api_bx').length > 0) return;
             if ($(el).hasClass('bx') && $(el).parents('.bx, .total_wrap, .api_bx').length > 0) return;
 
-            // 카드 안의 모든 텍스트, HTML 속성, 링크 주소(href, data-url) 싹쓸이
+            // HTML 소스, 텍스트, 안에 숨겨진 링크 주소 등 모든 텍스트를 하나의 문자열로 뭉침
             const blockHtml = $(el).html() || '';
             const blockText = $(el).text() || '';
-            const links = $(el).find('a').map((_, a) => $(a).attr('href') + ' ' + $(a).attr('data-url')).get().join(' ').toLowerCase();
+            const links = $(el).find('a').map((_, a) => {
+                return ($(a).attr('href') || '') + ' ' + ($(a).attr('data-url') || '');
+            }).get().join(' ');
 
             const combinedData = (blockHtml + ' ' + blockText + ' ' + links).toLowerCase();
 
-            // 이 거대한 데이터 뭉치 안에 내 도메인이 있는가?
-            if (combinedData.includes(cleanTargetUrl)) {
+            // 뭉친 데이터 안에 우리의 핵심 타겟 키워드(예: cukiz)가 포함되어 있는지 검사
+            if (combinedData.includes(searchTarget)) {
                 if (rank === -1) {
                     rank = currentRank;
-                    
-                    // 어떤 영역에서 찾았는지 분석
-                    if ($(el).closest('.api_subject_bx').length > 0) {
-                        blockType = '스마트블록(에어서치)';
-                    } else if ($(el).closest('.sp_nreview').length > 0) {
-                        blockType = '리뷰 영역';
-                    } else {
-                        blockType = '일반 통합검색';
-                    }
+                    // 발견 위치 판별
+                    if ($(el).closest('.api_subject_bx').length > 0) blockType = '스마트블록';
                 }
             }
-            // 광고가 아닌 순수 오가닉 결과이므로 순위 카운트 1 증가
-            currentRank++;
+            currentRank++; // 못 찾았으면 다음 결과물이므로 순위 1 증가
         });
 
-        // 결과 반환 (찾은 영역 정보 포함)
+        // 응답 전송
         return {
             statusCode: 200,
             headers: { 'Content-Type': 'application/json' },
@@ -93,6 +81,6 @@ exports.handler = async function(event, context) {
         };
 
     } catch (error) {
-        return { statusCode: 500, body: JSON.stringify({ errorMsg: `서버 통신 에러: ${error.message}` }) };
+        return { statusCode: 500, body: JSON.stringify({ errorMsg: `크롤링 에러: ${error.message}` }) };
     }
 };
