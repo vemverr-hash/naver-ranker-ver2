@@ -157,7 +157,9 @@ function renderTable() {
 
     rankData.forEach(item => {
         const latestRank = item.history.length > 0 ? item.history[item.history.length - 1].rank : null;
-        const rankText = latestRank === null ? '미확인' : (latestRank === -1 ? '순위 밖 (100위 밖)' : `${latestRank}위`);
+        const rankText = latestRank === null 
+    ? '미확인' 
+    : (latestRank === -1 ? '순위 밖 (150위권 외)' : `<span class="text-blue-600 font-bold">${latestRank}위</span>`);
         
         // 7일 추이 텍스트 생성 (예: 12위 → 10위 → 5위)
         const trendText = item.history.map(h => h.rank === -1 ? 'OUT' : h.rank).join(' <span class="text-gray-300">→</span> ');
