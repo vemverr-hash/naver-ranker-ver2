@@ -1,9 +1,6 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
 
-// IP 차단 방지를 위한 딜레이 함수
-const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-
 exports.handler = async function(event, context) {
     if (event.httpMethod !== 'POST') {
         return { statusCode: 405, body: JSON.stringify({ error: 'Method Not Allowed' }) };
@@ -12,106 +9,81 @@ exports.handler = async function(event, context) {
     try {
         const { keyword, targetUrl } = JSON.parse(event.body);
         
-        if (!keyword || !targetUrl) {
-            return { statusCode: 400, body: JSON.stringify({ error: '키워드와 URL을 모두 입력해주세요.' }) };
+        // PC 통합검색 URL
+        const searchUrl = `https://search.naver.com/search.naver?where=nexearch&query=${encodeURIComponent(keyword)}`;
+
+        const response = await axios.get(searchUrl, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                'Accept-Language': 'ko-KR,ko;q=0.9',
+                'Referer': 'https://www.naver.com/',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'same-origin'
+            },
+            timeout: 10000
+        });
+
+        const html = response.data;
+        const $ = cheerio.load(html);
+
+        // 캡차/차단 확인
+        if (html.includes('자동 입력 방지') || $('title').text().includes('캡차')) {
+            return { statusCode: 200, body: JSON.stringify({ rank: -1, errorMsg: '🚨 네이버 캡차(IP 차단) 발생' }) };
         }
 
-        // URL 정규화 (http, https, www, m. 제거 및 끝 슬래시 제거)
-        const cleanTargetUrl = targetUrl
-            .replace(/^https?:\/\//, '')
-            .replace(/^www\./, '')
-            .replace(/^m\./, '')
-            .replace(/\/$/, '')
-            .toLowerCase();
+        // URL 극단적 정규화 (모든 프로토콜, www, m. 제거 및 도메인 핵심만 추출)
+        // 예: https://cukiz.co.kr/product/1 -> cukiz.co.kr
+        const cleanTargetUrl = targetUrl.replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/^m\./, '').split('/')[0].toLowerCase();
 
         let rank = -1;
         let currentRank = 1;
-        const maxPages = 10; // 최대 탐색할 페이지 수 (10페이지 = 약 150개)
-        const resultsPerPage = 15; // 네이버 웹검색 1페이지당 노출 개수
+        let debugDetectedUrls =[]; // 봇이 실제로 읽은 상위 5개 사이트 수집용
 
-        // 1페이지부터 10페이지까지 반복하면서 찾기
-        for (let page = 1; page <= maxPages; page++) {
-            // start 값: 1, 16, 31, 46 ... (페이지별 시작 번호)
-            const startIdx = (page - 1) * resultsPerPage + 1;
+        // 1. 네이버 통합검색의 모든 검색결과 블록 추출 (스마트블록, 웹, 뷰 모두 포함)
+        const items = $('#main_pack li.bx, #main_pack div.total_wrap');
+
+        items.each((i, el) => {
+            // 파워링크(광고) 제외
+            if ($(el).find('.sp_powerlink').length > 0 || $(el).hasClass('powerlink_group')) return;
+
+            const blockHtml = $(el).html().toLowerCase();
+            const blockText = $(el).text().toLowerCase();
             
-            // '통합검색'이 아닌 '웹검색(where=web)' 탭 사용 (순위 딥서치용)
-            const searchUrl = `https://search.naver.com/search.naver?where=web&query=${encodeURIComponent(keyword)}&start=${startIdx}`;
-
-            const response = await axios.get(searchUrl, {
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-                    'Referer': 'https://search.naver.com/',
-                },
-                timeout: 8000 // 각 페이지당 타임아웃 8초
-            });
-
-            const html = response.data;
-            const $ = cheerio.load(html);
-
-            // 캡차(차단) 감지
-            if (html.includes('자동 입력 방지') || $('title').text().includes('캡차')) {
-                return {
-                    statusCode: 200,
-                    body: JSON.stringify({ rank: -1, errorMsg: `🚨 Netlify IP가 네이버에 의해 차단되었습니다. (페이지 ${page} 탐색 중)` })
-                };
-            }
-
-            // 웹검색 결과 블록
-            const items = $('li.bx, div.total_wrap');
-
-            // 검색 결과가 더 이상 없으면 반복문 종료 (예: 총 검색결과가 3페이지밖에 없는 경우)
-            if (items.length === 0) {
-                break;
-            }
-
-            let foundOnThisPage = false;
-
-            // 현재 페이지의 블록들 검사
-            items.each((i, el) => {
-                // 파워링크(광고) 제외
-                if ($(el).find('.sp_powerlink').length > 0 || $(el).closest('.sp_powerlink').length > 0) return;
-
-                const text = $(el).text().toLowerCase();
-                const htmlContent = $(el).html().toLowerCase();
-                const hrefs = $(el).find('a').map((_, a) => $(a).attr('href')).get().join(' ').toLowerCase();
-
-                // 모든 텍스트, html 요소, 링크 주소 뭉치기
-                const combinedData = text + ' ' + htmlContent + ' ' + hrefs;
-
-                // 내 URL이 포함되어 있는지 확인
-                if (combinedData.includes(cleanTargetUrl)) {
-                    rank = currentRank;
-                    foundOnThisPage = true;
-                    return false; // 찾았으면 each 반복문 즉시 탈출
+            // 디버깅용: 봇이 현재 읽고 있는 사이트들의 실제 링크를 5개까지만 수집해봄
+            if (debugDetectedUrls.length < 5) {
+                const link = $(el).find('a.title_link, a.link_tit, a.name').attr('href');
+                if (link && !link.includes('naver.com')) { // 네이버 내부 링크 제외
+                    debugDetectedUrls.push(link.replace(/^https?:\/\//, '').split('/')[0]);
                 }
-                
-                currentRank++; // 못 찾았으면 다음 블록이므로 순위 +1
-            });
-
-            // 내 사이트를 찾았다면 더 이상 다음 페이지를 긁을 필요 없이 종료
-            if (foundOnThisPage) {
-                break;
             }
 
-            // 서버 과부하 및 봇 차단 방지를 위해 다음 페이지로 넘어가기 전 0.3초 대기
-            if (page < maxPages) {
-                await sleep(300);
+            // 블록 내에 핵심 도메인이 텍스트나 링크로 존재하는가?
+            if (blockHtml.includes(cleanTargetUrl) || blockText.includes(cleanTargetUrl)) {
+                if (rank === -1) rank = currentRank;
             }
+            currentRank++;
+        });
+
+        // 2. [최후의 보루] 만약 블록 검사에서 -1이 나왔다면, 페이지 전체 HTML 소스코드에 도메인이 존재하는지 확인
+        // (쇼핑 동적 로딩 데이터나 숨겨진 태그에라도 들어있는지 검사)
+        let isAnywhereOnPage = false;
+        if (rank === -1 && html.toLowerCase().includes(cleanTargetUrl)) {
+            isAnywhereOnPage = true;
         }
 
-        // 10페이지까지 다 돌았는데 결과 반환
         return {
             statusCode: 200,
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ rank: rank })
+            body: JSON.stringify({ 
+                rank: rank, 
+                isAnywhere: isAnywhereOnPage,
+                debugInfo: debugDetectedUrls.join(', ') // 프론트엔드로 봇이 본 사이트들 전송
+            })
         };
 
     } catch (error) {
-        return {
-            statusCode: 500,
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ errorMsg: `서버 통신 에러 (TimeOut 또는 구조 변경): ${error.message}` })
-        };
+        return { statusCode: 500, body: JSON.stringify({ errorMsg: `서버 통신 에러: ${error.message}` }) };
     }
 };
