@@ -54,7 +54,7 @@ function deleteItem(id) {
     }
 }
 
-// 단일 순위 업데이트
+// ⭐ 수정한 업데이트 로직 (디버깅 정보 출력 포함)
 async function updateRank(id, showLoading = true) {
     const item = rankData.find(i => i.id === id);
     if (!item) return;
@@ -65,7 +65,6 @@ async function updateRank(id, showLoading = true) {
     }
 
     try {
-        // Netlify Function API 호출
         const response = await fetch('/.netlify/functions/checkRank', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -73,26 +72,40 @@ async function updateRank(id, showLoading = true) {
         });
 
         const data = await response.json();
-        const today = getTodayDate();
-        
-        // 히스토리 업데이트 로직
-        const existingDateIndex = item.history.findIndex(h => h.date === today);
-        if (existingDateIndex >= 0) {
-            item.history[existingDateIndex].rank = data.rank; // 오늘 데이터가 있으면 덮어쓰기
-        } else {
-            item.history.push({ date: today, rank: data.rank }); // 없으면 추가
+
+        if (data.errorMsg) {
+            alert(`[에러 발생]\n${data.errorMsg}`);
+            return; 
         }
 
-        // 최대 7일 치만 유지
+        const today = getTodayDate();
+        
+        // --- 🔎 디버깅 및 분석 알림창 ---
+        if (data.rank === -1) {
+            if (data.isAnywhere) {
+                alert(`[진단 결과: ${item.keyword}]\n❌ 순위 카운트 실패\n\n하지만 HTML 소스코드 내부에서 '${item.url}' 도메인이 발견되었습니다!\n\n이것은 귀하의 사이트가 '네이버 쇼핑'이나 '플레이스' 등 자바스크립트로 렌더링되는 특수 영역에 노출되고 있음을 의미합니다. (일반 봇으로는 순위 추적이 불가능한 영역입니다.)`);
+            } else {
+                alert(`[진단 결과: ${item.keyword}]\n❌ 첫 페이지에서 완전히 찾을 수 없습니다.\n\n🤖 봇이 현재 읽어들인 상위 타 사이트 목록:\n${data.debugInfo || '수집불가'}\n\n위 사이트들이 실제 검색결과와 다를 경우 네이버가 봇에게 다른 화면을 보여주고 있는 것입니다.`);
+            }
+        }
+        // ---------------------------------
+
+        const existingDateIndex = item.history.findIndex(h => h.date === today);
+        if (existingDateIndex >= 0) {
+            item.history[existingDateIndex].rank = data.rank;
+        } else {
+            item.history.push({ date: today, rank: data.rank });
+        }
+
         if (item.history.length > 7) {
-            item.history.shift(); // 가장 오래된 데이터 삭제
+            item.history.shift(); 
         }
 
         saveData();
         
     } catch (error) {
         console.error('업데이트 실패:', error);
-        alert(`${item.keyword} 업데이트 중 오류가 발생했습니다.`);
+        alert(`${item.keyword} 업데이트 중 네트워크 오류가 발생했습니다.`);
     } finally {
         if (showLoading) renderTable();
     }
