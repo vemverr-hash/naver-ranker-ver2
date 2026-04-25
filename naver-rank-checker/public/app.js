@@ -78,6 +78,11 @@ async function updateRank(id, showLoading = true) {
             return; 
         }
 
+// 💡 추가된 부분: 스마트블록에서 찾았을 경우 콘솔이나 화면에 알려줌
+if (data.rank !== -1 && data.blockType) {
+    console.log(`${item.keyword}: [${data.blockType}] 영역의 ${data.rank}위에서 발견됨`);
+    // 필요 시 UI의 순위 텍스트 옆에 뱃지처럼 띄울 수도 있습니다.
+}
         const today = getTodayDate();
         
         // --- 🔎 디버깅 및 분석 알림창 ---
